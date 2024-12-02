@@ -1,0 +1,387 @@
+---
+title: "Gasto de bolsillo, ENAHO" 
+author: "Jessica Zafra, 
+         David Villarreal"
+date: "2024-11-17"
+output: 
+  html_document: default
+  word_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r loading packages, echo=FALSE, message=FALSE}
+
+if(!require(pacman)) install.packages("pacman")
+pacman::p_load(tidyverse, 
+               knitr, 
+               here,
+               janitor,
+               inspectdf,
+               gtsummary,
+               stringi,
+               plotly,
+               ggplot2,
+               haven)
+```
+
+# Procesando bases del 2023
+https://proyectos.inei.gob.pe/iinei/srienaho/index.htm
+
+## Datos sobre gasto de bolsillo
+
+Datos obtenidos de Sumaria-2023-8g
+- Gasto total: GASHOG2D
+- cuidado, conservacion de salud y servicios medicos: GRU51HD
+
+Esta variable de calcula de la siguiente manera:
+∀ (P41-5A(i) = 1 ∧ I416(i) > 0)
+GRU61HD = SUM I416(i)
+
+Es decir, ENAHO toma los 16 rubros de gasto a nivel hogar y evalúa primero si algún miembro del hogar pagó y luego cuánto pago. Finalmente, se suman los datos.
+
+- total de personas en el hogar: TOTMIEHO
+- estrato socioeconómico: ESTRSOCIAL
+1.A
+2.B
+3.C
+4.D
+5.E
+6. Rural
+
+Definición de las variables:
+
+Catastrophic health expenditure occurs when out-of-pocket health-care costs exceed 10% of total household spending
+
+https://equityhealthj.biomedcentral.com/articles/10.1186/s12939-023-01847-0#:~:text=Catastrophic%20health%20expenditure%20occurs%20when,20%25%20of%20total%20household%20expenditure.
+https://repositorio.up.edu.pe/handle/11354/4211
+
+Se crea la variable porc_gasto que representa el porcentaje del gasto total debido a salud.
+Luego se crea la variable gasto_cata. Variable dicotómica: 0 cuando el porcentaje de gasto en salud es menor a 10% y 1 cuando el gasto es mayor o igual a 10%.
+
+```{r echo=FALSE, message=FALSE}
+sumaria_2023 <- read_csv(here("data/Sumaria-2023.csv"), locale = locale(encoding = "ISO-8859-1")) %>% 
+  select(c("AÑO", "CONGLOME", "VIVIENDA", "HOGAR", "GASHOG2D", "GRU51HD", "TOTMIEHO", "ESTRSOCIAL", "FACTOR07")) %>% 
+  mutate(porc_gasto = 100*GRU51HD/GASHOG2D,
+         gasto_cata = case_when(porc_gasto >= 10 ~ 1,
+                                TRUE ~ 0)) %>% 
+  rename(num_habit = TOTMIEHO,
+         est_social = ESTRSOCIAL,
+         gasto_total = GASHOG2D,
+         gasto_salud = GRU51HD)
+```
+
+
+```{r echo=FALSE, message=FALSE}
+#recuperando variable de hacinamiento
+hogares_2023 <- read_csv(here("data/Enaho01-2023-100.csv"), locale = locale(encoding = "ISO-8859-1")) %>% 
+  select(c("AÑO", "CONGLOME", "VIVIENDA", "HOGAR", "NBI2"))
+```
+
+Para los datos individuales se usa el modulo de salud (400). Se filtra para obtener solo los datos del jefe/jefa de hogar. Se corrobora que hay el mismo número de hogares que en la sumaria.
+
+Los datos que se obtienen son los siguientes:
+- Padece de enfermedad cronica: P401 - 1 si, 2 no - modificado por 0 no, 1 si
+- Seguro de salud: essalud - P4191, privado - P4192, EPS - P4193, FFAA - P4194, SIS - P4195, universitario - P4196, escolar - P4197, otro - P4198 - modificado por 0 no, 1 si
+
+1. si
+2. no
+
+- Sexo: P207 - modificado a 0 hombre, 1 mujer
+
+1. Hombre
+2. Mujer
+
+- Edad en años cumplidos: P208A
+- Estado civil: P209
+
+1. Conviviente
+2. Casado(a)
+3. Viudo(a)
+4. Divorciado(a)
+5. Separado(a)
+6. Soltero(a)
+9 Missing value
+
+- Ultimo nivel de estudios aprobado: P301A
+
+1. Sin Nivel
+2. Inicial
+3. Primaria Incompleta
+4. Primaria Completa
+5. Secundaria Incompleta
+6. Secundaria Completa
+7. Superior No Universitaria Incompleta
+8. Superior No Universitaria Completa
+9. Superior Universitaria Incompleta
+10. Superior Universitaria Completa
+11. Maestria/Doctorado
+12. Básica especial
+
+Factor: FACTOR07 = las bases tienen el mismo factor, no voy a jalarlo de esta base
+
+hacinamiento - variable presente en base 1 -NBI2
+0.Vivienda sin hacinamiento
+1.Vivienda con hacinamiento
+
+gasto por rubros - variable presente en gasto por hogar
+I41601 - consulta
+I41603 - análisis
+I41604 - Rayos x, tomografía
+I41605 - otros exámenes
+I41602 - medicinas/insumos
+I41606 - servicio dental y conexos
+I41607 - oftalmología
+I41608 - compra de lentes
+I41609 - vacunas
+I41610 - control de salud de niños
+I41611 - anticonceptivos
+I41612 - otros gastos
+I41613 - hospitalizacion
+I41614 - intervencion quirurgica
+I41615 - controles por embarazo
+I41616 - parto
+
+variable pagado por miembro del hogar
+P4151$01 - consulta
+
+```{r echo=FALSE, message=FALSE}
+salud_2023_rubros <- read_csv(here("data/Enaho01A-2023-400.csv"), locale = locale(encoding = "ISO-8859-1")) %>% select(1:5, c("P203", "P401", "P4191", "P4192", "P4193", "P4194", "P4195", "P4196", "P4197", "P4198", "P207", "P208A", "P209", "P301A"),starts_with(c("P4151$", "I416"))) %>% 
+  rename(enf_cron = P401,
+         seg_essalud = P4191, 
+         seg_privado = P4192, 
+         seg_EPS = P4193, 
+         seg_FFAA = P4194, 
+         seg_SIS = P4195, 
+         seg_universitario = P4196, 
+         seg_escolar = P4197, 
+         seg_otro = P4198,
+         sexo = P207,
+         edad = P208A,
+         est_civil = P209,
+         nivel_educ = P301A)
+#la base contiene informacion sobre el rubro y el pago por alguien del hogar
+
+salud_2023_rubros %>% 
+  group_by(CONGLOME, VIVIENDA, HOGAR) %>% 
+  count()
+
+salud_2023_rubros %>% 
+  group_by(CONGLOME, VIVIENDA, HOGAR, P203) %>% 
+  count()
+
+salud_2023_rubros %>%
+  filter(`P4151$01` == 0, I41601 > 1) %>%
+  summarise(count = n())
+#no todos los gastos se pagan por algun miembro del hogar... necesidad de usar ambas variables
+
+gastos <- salud_2023_rubros %>% 
+  group_by(CONGLOME, VIVIENDA, HOGAR) %>%
+  reframe(gasto_consulta = sum(ifelse(`P4151$01` == 1,I41601, 0), na.rm = TRUE),
+          gasto_medicina = sum(ifelse(`P4151$02` == 1, I41602, 0), na.rm = TRUE),
+          gasto_analisis = sum(ifelse(`P4151$03` == 1, I41603, 0), na.rm = TRUE),
+          gasto_rayosX = sum(ifelse(`P4151$04` == 1, I41604, 0), na.rm = TRUE),
+          gasto_otros_exam = sum(ifelse(`P4151$05` == 1, I41605, 0), na.rm = TRUE),
+          gasto_dental = sum(ifelse(`P4151$06` == 1, I41606, 0), na.rm = TRUE),
+          gasto_oftalmo = sum(ifelse(`P4151$07` == 1, I41607, 0), na.rm = TRUE),
+          gasto_lentes = sum(ifelse(`P4151$08` == 1, I41608, 0), na.rm = TRUE),
+          gasto_vacunas = sum(ifelse(`P4151$09` == 1, I41609, 0), na.rm = TRUE),
+          gasto_cred = sum(ifelse(`P4151$10` == 1, I41610, 0), na.rm = TRUE),
+          gasto_anticonc = sum(ifelse(`P4151$11` == 1, I41611, 0), na.rm = TRUE),
+          gasto_otros_gastos = sum(ifelse(`P4151$12` == 1, I41612, 0), na.rm = TRUE),
+          gasto_hospital = sum(ifelse(`P4151$13` == 1, I41613, 0), na.rm = TRUE),
+          gasto_cirugia = sum(ifelse(`P4151$14` == 1, I41614, 0), na.rm = TRUE),
+          gasto_embarazo = sum(ifelse(`P4151$15` == 1, I41615, 0), na.rm = TRUE),
+          gasto_parto = sum(ifelse(`P4151$16` == 1, I41616, 0), na.rm = TRUE))
+
+salud_2023 <- left_join(salud_2023_rubros, gastos, by = c("CONGLOME", "VIVIENDA", "HOGAR")) %>% 
+  select(!starts_with(c("P4151$","I416")))
+
+por_enf_cronica <- salud_2023 %>% 
+  group_by(CONGLOME, VIVIENDA, HOGAR) %>% 
+  reframe(enf_cronica_hogar = sum(ifelse(enf_cron == 1,1, 0), na.rm = TRUE),
+          n_hogar = n(),
+          por_enf_cronica_hogar = round(enf_cronica_hogar/n_hogar*100,1))
+  # % de personas del hogar con enfermedad cronica
+  # antes de filtrar por jefe de hogar
+  # group_by hogar - count
+  # chequear codigo para enfermedad cronica - 0 no , 1 si - sumatoria de esta varaible por hogar (group_by)
+  # crear % personar con enf cronica por hogar / personas por hogar 
+
+salud_2023 <- left_join(salud_2023, por_enf_cronica, by = c("CONGLOME", "VIVIENDA", "HOGAR"))
+
+#averiguar por qué se pierden los datos del conglomerado - probar con left_joint
+```
+
+
+```{r echo=FALSE, message=FALSE}
+
+data_2023 <- left_join(sumaria_2023, salud_2023, by = c("AÑO", "CONGLOME", "VIVIENDA", "HOGAR"))
+
+```
+
+Creando base para los 5 años
+
+```{r echo=FALSE, message=FALSE}
+# Define the years you want to process
+years <- 2019:2023  # Example years from 2019 to 2023
+
+# Initialize an empty list to store the joined data for each year
+all_data <- list()
+
+# Loop over each year
+for (year in years) {
+  
+  # Construct the file paths dynamically
+  sumaria_file <- here(paste0("data/Sumaria-", year, ".csv"))
+  salud_file <- here(paste0("data/Enaho01A-", year, "-400.csv"))
+  hogares_file <- here(paste0("data/Enaho01-", year, "-100.csv"))
+  
+  # Import the Sumaria dataset for the current year
+  sumaria_data <- read_csv(sumaria_file, locale = locale(encoding = "ISO-8859-1")) %>% 
+    select(c("CONGLOME", "VIVIENDA", "HOGAR", "GASHOG2D", "GRU51HD", "INGHOG1D", "INGMO1HD", "TOTMIEHO", "ESTRSOCIAL", "FACTOR07"))
+  
+  hogares_data <- read_csv(hogares_file, locale = locale(encoding = "ISO-8859-1")) %>% 
+    select(c("CONGLOME", "VIVIENDA", "HOGAR", "NBI2"))
+  
+  # Import the Salud dataset for the current year, DO NOT filtering for P203 == 1
+  salud_data <- read_csv(salud_file, locale = locale(encoding = "ISO-8859-1")) %>% 
+    select(c("AÑO", "CONGLOME", "VIVIENDA", "HOGAR", "P203", "P401", "P4191", "P4192", "P4193", "P4194", "P4195", "P4196", "P4197", "P4198", "P207", "P208A", "P209", "P301A"), starts_with(c("P4151$", "I416")))
+  
+  gastos_data <- salud_data %>% 
+  group_by(CONGLOME, VIVIENDA, HOGAR) %>%
+  reframe(gasto_consulta = sum(ifelse(`P4151$01` == 1,I41601, 0), na.rm = TRUE),
+          gasto_medicina = sum(ifelse(`P4151$02` == 1, I41602, 0), na.rm = TRUE),
+          gasto_analisis = sum(ifelse(`P4151$03` == 1, I41603, 0), na.rm = TRUE),
+          gasto_rayosX = sum(ifelse(`P4151$04` == 1, I41604, 0), na.rm = TRUE),
+          gasto_otros_exam = sum(ifelse(`P4151$05` == 1, I41605, 0), na.rm = TRUE),
+          gasto_dental = sum(ifelse(`P4151$06` == 1, I41606, 0), na.rm = TRUE),
+          gasto_oftalmo = sum(ifelse(`P4151$07` == 1, I41607, 0), na.rm = TRUE),
+          gasto_lentes = sum(ifelse(`P4151$08` == 1, I41608, 0), na.rm = TRUE),
+          gasto_vacunas = sum(ifelse(`P4151$09` == 1, I41609, 0), na.rm = TRUE),
+          gasto_cred = sum(ifelse(`P4151$10` == 1, I41610, 0), na.rm = TRUE),
+          gasto_anticonc = sum(ifelse(`P4151$11` == 1, I41611, 0), na.rm = TRUE),
+          gasto_otros_gastos = sum(ifelse(`P4151$12` == 1, I41612, 0), na.rm = TRUE),
+          gasto_hospital = sum(ifelse(`P4151$13` == 1, I41613, 0), na.rm = TRUE),
+          gasto_cirugia = sum(ifelse(`P4151$14` == 1, I41614, 0), na.rm = TRUE),
+          gasto_embarazo = sum(ifelse(`P4151$15` == 1, I41615, 0), na.rm = TRUE),
+          gasto_parto = sum(ifelse(`P4151$16` == 1, I41616, 0), na.rm = TRUE))
+  
+  #creando porcentaje de personas en el hogar con enfermedad cronica
+  por_enf_cronica <- salud_data %>% 
+  group_by(CONGLOME, VIVIENDA, HOGAR) %>% 
+  reframe(enf_cronica_hogar = sum(ifelse(P401 == 1,1, 0), na.rm = TRUE),
+          n_hogar = n(),
+          por_enf_cronica_hogar = round(enf_cronica_hogar/n_hogar*100,1))
+
+  salud_data <- left_join(salud_data, por_enf_cronica, by = c("CONGLOME", "VIVIENDA", "HOGAR"))
+  
+  #join for sumaria y hogar
+  sumaria_data <- left_join(sumaria_data, hogares_data, by = c("CONGLOME", "VIVIENDA", "HOGAR"))
+  
+  #join for gastos and salud
+  salud_data <- left_join(salud_data, gastos_data, by = c("CONGLOME", "VIVIENDA", "HOGAR")) %>% 
+  select(!starts_with(c("P4151$","I416")))
+  
+  # Perform the left join on the specified columns
+  joined_data <- left_join(sumaria_data, salud_data, by = c("CONGLOME", "VIVIENDA", "HOGAR")) %>% 
+    filter(P203 == 1) # keep one observation per household
+  
+  # Store the joined data in the list with the year as the name
+  all_data[[as.character(year)]] <- joined_data
+}
+
+combined_data <- bind_rows(all_data, .id = "Year")
+
+combined_data_clean <- combined_data %>% 
+  select(!"Year") %>% 
+    mutate(porc_gasto = case_when(
+             is.na(GRU51HD) | is.na(GASHOG2D) | GASHOG2D == 0 ~ NA_real_,  # Assign NA if either is missing
+             TRUE ~ 100 * GRU51HD / GASHOG2D),
+         gasto_cata = case_when(is.na(porc_gasto) ~ NA_real_,
+                                porc_gasto >= 10 ~ 1,
+                                TRUE ~ 0),
+         ingreso_dia = case_when( #se considera ingresos brutos (dinero + bienes) ya que los gastos son mas altos que el ingreso monetario para algunos hogares
+           is.na(INGHOG1D) ~ NA_real_, 
+           TRUE ~ INGHOG1D/365),
+         affordability = case_when(is.na(ingreso_dia) | is.na(GRU51HD) | ingreso_dia == 0 ~ NA_real_,
+                                   TRUE ~ GRU51HD/ingreso_dia)) %>% #dias laborados para pagar salud
+  rename(year = AÑO,
+         conglome = CONGLOME,
+         vivienda = VIVIENDA,
+         hogar = HOGAR,
+         num_habit = TOTMIEHO,
+         est_social = ESTRSOCIAL,
+         gasto_total = GASHOG2D,
+         gasto_salud = GRU51HD,
+         ingreso_bruto = INGHOG1D,
+         ingreso_monetario = INGMO1HD,
+         enf_cron = P401,
+         seg_essalud = P4191, 
+         seg_privado = P4192, 
+         seg_EPS = P4193, 
+         seg_FFAA = P4194, 
+         seg_SIS = P4195, 
+         seg_universitario = P4196, 
+         seg_escolar = P4197, 
+         seg_otro = P4198,
+         sexo = P207,
+         edad = P208A,
+         est_civil = P209,
+         nivel_educ = P301A,
+         factor_enaho = FACTOR07,
+         hacinamiento = NBI2) %>% 
+  mutate(across(.cols = c(enf_cron, seg_essalud, seg_privado, seg_EPS, seg_FFAA, seg_SIS, seg_universitario, seg_escolar, seg_otro), 
+         .fns = ~case_when(. == 2 ~ 0,
+                           TRUE ~ 1)),
+         across(.cols = c(enf_cron, seg_essalud, seg_privado, seg_EPS, seg_FFAA, seg_SIS, seg_universitario, seg_escolar, seg_otro, hacinamiento), 
+         .fns = ~labelled(.x, labels = c(No = 0, Yes = 1))),
+         sexo = case_when(sexo == 1 ~ 0,
+                          sexo == 2 ~ 1),
+         sexo = labelled(sexo, labels = c (hombre = 0, mujer = 1)),
+         est_civil = labelled(est_civil, labels = c(conviviente = 1,
+                                        casado = 2,
+                                        viudo = 3,
+                                        divorciado = 4,
+                                        separado = 5,
+                                        soltero = 6)),
+         nivel_educ = case_when(nivel_educ == 99 ~ NA_integer_,
+                                TRUE ~ nivel_educ),
+         nivel_educ = labelled(nivel_educ, labels = c("sin nivel" = 1,
+                                                      "inicial" = 2,
+                                                      "primaria incompleta" = 3,
+                                                      "primaria completa" = 4,
+                                                      "secundaria incompleta" = 5,
+                                                      "secundaria completa" = 6,
+                                                      "superior no univ incompleta" = 7,
+                                                      "superior no univ completa" = 8,
+                                                      "superior univ incompleta" = 9,
+                                                      "superior univ completa" = 10,
+                                                      "maestria/doctorado" = 11,
+                                                      "basica especial" = 12)))
+
+#combined_data_clean %>% group_by(seg_essalud) %>% count()
+
+#Crear factor#Crear factorcount()
+n_total <- combined_data_clean %>% 
+  count()
+#creando factor por year
+n_year <- combined_data_clean %>% 
+  group_by(year) %>% 
+  count() %>% 
+  mutate(porcentaje = n/n_total,
+         factor_year = 1/porcentaje) %>% 
+  select(year, factor_year) %>% 
+  mutate(factor_year = as.numeric(factor_year)) %>% 
+  ungroup()
+
+#agregando los factores por year a la base de datos y creando ultimate_factor
+combined_data_clean <- left_join(combined_data_clean, n_year, by="year") %>% 
+  mutate(ultimate_factor = factor_enaho*factor_year)
+
+write_csv(combined_data_clean, here("data/combined_data.csv"))
+
+```
+

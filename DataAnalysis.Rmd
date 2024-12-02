@@ -1,0 +1,488 @@
+---
+title: "Gasto de bolsillo, ENAHO" 
+author: "Jessica Zafra, 
+         David Villarreal"
+date: "2024-12-02"
+output: 
+  html_document: default
+  word_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r loading packages, echo=FALSE, message=FALSE}
+if(!require(pacman)) install.packages("pacman")
+pacman::p_load(tidyverse,
+               here,
+               survey,
+               labelled,
+               gtsummary,
+               openxlsx,
+               tibble,
+               lme4,
+               lmerTest)
+```
+
+```{r Cargar la base de datos, echo=FALSE, message=FALSE}
+# Cargar la base de datos
+Database <- read.csv(here("data/combined_data.csv"))
+
+# Asignar etiquetas a variables
+Database <- Database %>%
+  mutate(
+    sexo = factor(sexo, levels = c(0, 1), labels = c("Mujer", "Hombre")),
+    est_civil = factor(est_civil, levels = c(1, 2, 3, 4, 5, 6), labels = c("Soltero", "Casado", "Divorciado", "Viudo", "Conviviente", "Separado")),
+    nivel_educ = factor(nivel_educ, levels = c(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11),
+                        labels = c("Ninguno", "Inicial", "Primaria incompleta", "Primaria completa",
+                                   "Secundaria incompleta", "Secundaria completa", "Superior no universitaria incompleta",
+                                   "Superior no universitaria completa", "Superior universitaria incompleta",
+                                   "Superior universitaria completa", "Posgrado")),
+    seg_essalud = factor(seg_essalud, levels = c(0, 1), labels = c("No", "Sí")),
+    seg_SIS = factor(seg_SIS, levels = c(0, 1), labels = c("No", "Sí")),
+    edadcat = cut(edad, breaks = c(-Inf, 17, 64, Inf), labels = c("Menor de edad (0-17)", "Adulto en edad de trabajar (18-64)", "Adulto mayor (65+)"), right = TRUE),
+    # Crear la nueva variable de nivel educativo agrupado en tres categorías
+    nivel_educa_3cat = case_when(
+      nivel_educ %in% c("Ninguno", "Inicial", "Primaria incompleta", "Primaria completa") ~ "Primaria (0 a 6 años)",
+      nivel_educ %in% c("Secundaria incompleta", "Secundaria completa") ~ "Secundaria (7 a 11 años)",
+      nivel_educ %in% c("Superior no universitaria incompleta", "Superior no universitaria completa",
+                        "Superior universitaria incompleta", "Superior universitaria completa", "Posgrado") ~ "Superior (12 a más)"
+    ),
+    # Asignar etiquetas a gasto_cata y enf_cronica_hogar
+    gasto_cata = factor(gasto_cata, levels = c(0, 1), labels = c("No", "Sí")),
+    enf_cronica = factor(enf_cron, levels = c(0, 1), labels = c("No", "Sí")) #Hay dos variables de enfermedad cronica, esta se refiere al jefe de hogar
+  )
+
+
+# Agregar etiquetas a variables numéricas
+Database <- Database %>%
+  set_variable_labels(
+    conglome = "Conglomerado",
+    vivienda = "Número de vivienda",
+    hogar = "Número de hogar",
+    gasto_total = "Gasto total (anual)", #ojo que los datos son anualizados
+    gasto_salud = "Gasto en salud (anual)",
+    ingreso_bruto = "Ingreso bruto anual",
+    ingreso_monetario = "Ingreso monetario anual",
+    num_habit = "Número de habitantes en el hogar",
+    est_social = "Estrato social",
+    factor_enaho = "Factor de ponderación",
+    hacinamiento = "Hacinamiento (hogar)",
+    por_enf_cronica_hogar = "Porcentaje de personas con enfermedad crónica en el hogar"
+  )
+
+# Visualizar estructura con etiquetas
+
+str(Database)
+```
+
+
+```{r Criterios de inclusion, echo=FALSE, message=FALSE}
+#3. Criterios de inclusion
+
+# Eliminar filas con datos faltantes en las variables especificadas
+Database <- Database %>%
+  drop_na(sexo, est_civil, nivel_educ, seg_essalud, seg_SIS, edad, gasto_cata, enf_cron)
+# Filtrar la base de datos para incluir solo mayores de edad
+Database <- Database %>%
+  filter(edad >= 18)
+
+```
+
+
+```{r Diseño de muestreo complejo, echo=FALSE, message=FALSE}
+#4. Diseño de muestreo complejo
+
+# Configurar tratamiento para PSU solitarias
+options(survey.lonely.psu = "adjust") 
+
+# Diseño con solo ponderación
+design <- svydesign(
+  ids = ~1,                 # Sin conglomerados
+  strata = NULL,            # Sin estratos
+  weights = ~ultimate_factor, # Solo factor de ponderación
+  data = Database
+)
+
+# Verificar el diseño
+summary(design)
+
+# Verificar el diseño
+summary(design)
+
+```
+
+
+```{r Análisis descriptivo sin ponderar, echo=FALSE, message=FALSE}
+
+# 5. Análisis descriptivo sin ponderar - Sociodemografico
+
+# Crear una función para el cálculo agrupado con el análisis "pooled"
+agregar_pooled <- function(data, group_var) {
+  # Agrupar por año y variable
+  tabla <- data %>%
+    group_by(year, {{group_var}}) %>%
+    summarise(n = n(), .groups = 'drop') %>%
+    group_by(year) %>%
+    mutate(percent = (n / sum(n)) * 100) %>%
+    pivot_wider(names_from = year, values_from = c(n, percent)) %>%
+    rename_with(~gsub("percent_", "%_", .), starts_with("percent")) %>%
+    rename_with(~gsub("n_", "n_", .), starts_with("n"))
+  
+  # Agregar el análisis "pooled" para todos los años
+  total_pooled <- nrow(data)
+  tabla_pooled <- data %>%
+    group_by({{group_var}}) %>%
+    summarise(
+      n_pooled = n(),
+      percent_pooled = (n_pooled / total_pooled) * 100,
+      .groups = 'drop'
+    )
+  
+  # Combinar la tabla con el análisis "pooled"
+  tabla_completa <- left_join(tabla, tabla_pooled, by = as.character(substitute(group_var)))
+  
+  # Reorganizar las columnas para que el orden sea n_year, %_year para cada año
+  columnas_ordenadas <- c(as.character(substitute(group_var)))
+  for (year in sort(unique(data$year))) {
+    columnas_ordenadas <- c(columnas_ordenadas, paste0("n_", year), paste0("%_", year))
+  }
+  columnas_ordenadas <- c(columnas_ordenadas, "n_pooled", "percent_pooled")
+  
+  tabla_completa <- tabla_completa %>%
+    select(all_of(columnas_ordenadas))
+  
+  return(tabla_completa)
+}
+
+# Crear tablas con el análisis "pooled"
+tabla_sexo <- agregar_pooled(Database, sexo)
+tabla_estado_civil <- agregar_pooled(Database, est_civil)
+tabla_nivel_educativo <- agregar_pooled(Database, nivel_educa_3cat)
+tabla_seg_essalud <- agregar_pooled(Database, seg_essalud)
+tabla_seg_SIS <- agregar_pooled(Database, seg_SIS)
+tabla_edadcat <- agregar_pooled(Database, edadcat)
+tabla_gasto_cata <- agregar_pooled(Database, gasto_cata)
+tabla_enf_cronica <- agregar_pooled(Database, enf_cron)
+
+# Crear una sola hoja de Excel con todas las tablas
+wb <- createWorkbook()
+
+# Agregar una hoja con un nombre más corto
+addWorksheet(wb, "Sociodemographics")
+
+# Escribir las tablas en diferentes secciones de la misma hoja
+writeData(wb, "Sociodemographics", "Sexo", startRow = 1, startCol = 1)
+writeData(wb, "Sociodemographics", tabla_sexo, startRow = 2, startCol = 1)
+
+writeData(wb, "Sociodemographics", "Estado Civil", startRow = nrow(tabla_sexo) + 4, startCol = 1)
+writeData(wb, "Sociodemographics", tabla_estado_civil, startRow = nrow(tabla_sexo) + 5, startCol = 1)
+
+writeData(wb, "Sociodemographics", "Nivel Educativo", startRow = nrow(tabla_sexo) + nrow(tabla_estado_civil) + 8, startCol = 1)
+writeData(wb, "Sociodemographics", tabla_nivel_educativo, startRow = nrow(tabla_sexo) + nrow(tabla_estado_civil) + 9, startCol = 1)
+
+writeData(wb, "Sociodemographics", "Seguro ESSALUD", startRow = nrow(tabla_sexo) + nrow(tabla_estado_civil) + nrow(tabla_nivel_educativo) + 12, startCol = 1)
+writeData(wb, "Sociodemographics", tabla_seg_essalud, startRow = nrow(tabla_sexo) + nrow(tabla_estado_civil) + nrow(tabla_nivel_educativo) + 13, startCol = 1)
+
+writeData(wb, "Sociodemographics", "Seguro SIS", startRow = nrow(tabla_sexo) + nrow(tabla_estado_civil) + nrow(tabla_nivel_educativo) + nrow(tabla_seg_essalud) + 16, startCol = 1)
+writeData(wb, "Sociodemographics", tabla_seg_SIS, startRow = nrow(tabla_sexo) + nrow(tabla_estado_civil) + nrow(tabla_nivel_educativo) + nrow(tabla_seg_essalud) + 17, startCol = 1)
+
+writeData(wb, "Sociodemographics", "Edad Categorizada", startRow = nrow(tabla_sexo) + nrow(tabla_estado_civil) + nrow(tabla_nivel_educativo) + nrow(tabla_seg_essalud) + nrow(tabla_seg_SIS) + 20, startCol = 1)
+writeData(wb, "Sociodemographics", tabla_edadcat, startRow = nrow(tabla_sexo) + nrow(tabla_estado_civil) + nrow(tabla_nivel_educativo) + nrow(tabla_seg_essalud) + nrow(tabla_seg_SIS) + 21, startCol = 1)
+
+writeData(wb, "Sociodemographics", "Gasto Catastrófico", startRow = nrow(tabla_sexo) + nrow(tabla_estado_civil) + nrow(tabla_nivel_educativo) + nrow(tabla_seg_essalud) + nrow(tabla_seg_SIS) + nrow(tabla_edadcat) + 24, startCol = 1)
+writeData(wb, "Sociodemographics", tabla_gasto_cata, startRow = nrow(tabla_sexo) + nrow(tabla_estado_civil) + nrow(tabla_nivel_educativo) + nrow(tabla_seg_essalud) + nrow(tabla_seg_SIS) + nrow(tabla_edadcat) + 25, startCol = 1)
+
+writeData(wb, "Sociodemographics", "Enfermedad Crónica del jefe del Hogar", startRow = nrow(tabla_sexo) + nrow(tabla_estado_civil) + nrow(tabla_nivel_educativo) + nrow(tabla_seg_essalud) + nrow(tabla_seg_SIS) + nrow(tabla_edadcat) + nrow(tabla_gasto_cata) + 28, startCol = 1)
+writeData(wb, "Sociodemographics", tabla_enf_cronica, startRow = nrow(tabla_sexo) + nrow(tabla_estado_civil) + nrow(tabla_nivel_educativo) + nrow(tabla_seg_essalud) + nrow(tabla_seg_SIS) + nrow(tabla_edadcat) + nrow(tabla_gasto_cata) + 29, startCol = 1)
+
+# Guardar el archivo de Excel
+saveWorkbook(wb, "output/Tabla0_sociodemografico.xlsx", overwrite = TRUE)
+
+# Mensaje de éxito
+cat("Las tablas descriptivas han sido guardadas en una sola hoja en 'Tabla0_sociodemografico.xlsx' en tu directorio de trabajo.")
+
+```
+
+
+```{r Análisis descriptivo con ponderación, echo=FALSE, message=FALSE}
+
+#6. Análisis descriptivo con ponderación
+
+# Función para calcular la frecuencia y el porcentaje ponderado para una variable dada
+calcular_ponderado_por_anio <- function(design, variable) {
+  # Convertir la variable 'year' a un factor para asegurarnos de que se considere cada año
+  design$variables$year <- as.factor(design$variables$year)
+  
+  # Utilizar svyby para calcular el porcentaje ponderado por cada categoría de la variable para cada año
+  formula_var <- as.formula(paste0("~", variable))
+  tabla_ponderada_anio <- svyby(formula_var, ~year, design, svymean, na.rm = TRUE)
+  
+  # Reformatear los resultados para facilitar la interpretación
+  columnas_relevantes <- names(tabla_ponderada_anio)[grepl(variable, names(tabla_ponderada_anio))]
+  tabla_ponderada_anio <- tabla_ponderada_anio %>%
+    select(year, all_of(columnas_relevantes)) %>%
+    gather(key = "categoria", value = "proportion_weighted", -year) %>%
+    mutate(proportion_weighted = proportion_weighted * 100)
+  
+  # Calcular el porcentaje "pooled" para todos los años
+  tabla_ponderada_pooled <- svymean(formula_var, design, na.rm = TRUE)
+  tabla_ponderada_pooled <- as.data.frame(tabla_ponderada_pooled) %>%
+    rownames_to_column(var = "categoria") %>%
+    mutate(proportion_pooled = mean * 100) %>%
+    select(categoria, proportion_pooled)
+  
+  return(list(anio = tabla_ponderada_anio, pooled = tabla_ponderada_pooled))
+}
+
+# Lista de variables a analizar
+variables <- c("sexo", "est_civil", "nivel_educa_3cat", "seg_essalud", "seg_SIS", "edadcat", "gasto_cata", "por_enf_cronica_hogar")
+
+# Crear una lista para almacenar los resultados de cada variable
+resultados_ponderados <- list()
+
+# Calcular las tablas ponderadas para cada variable utilizando el diseño de muestreo complejo
+for (var in variables) {
+  resultados_ponderados[[var]] <- calcular_ponderado_por_anio(design, var)
+}
+
+# Mostrar los resultados ponderados para cada variable
+for (var in variables) {
+  cat("\nPorcentajes ponderados por año para la variable '", var, "':\n", sep = "")
+  print(resultados_ponderados[[var]]$anio)
+  
+  cat("\nPorcentajes ponderados (pooled) para la variable '", var, "':\n", sep = "")
+  print(resultados_ponderados[[var]]$pooled)
+}
+
+
+```
+
+
+```{r Análisis descriptivo, echo=FALSE, message=FALSE}
+
+# 7. Análisis descriptivo - Media y Desviación Estándar de gastos
+# Modificado para exportar los resultados de medias y desviaciones estándar ponderadas
+
+# Corrected function to calculate weighted mean and standard deviation by year and pooled
+calcular_media_sd_ponderada <- function(design, group_var) {
+  # Create a formula for the variable
+  formula_var <- as.formula(paste0("~", group_var))
+  
+  # Calculate weighted mean by year
+  tabla_media_anio <- svyby(formula_var, ~year, design, svymean, na.rm = TRUE) %>%
+    as.data.frame()
+  
+  # Calculate weighted variance by year
+  tabla_var_anio <- svyby(formula_var, ~year, design, svyvar, na.rm = TRUE) %>%
+    as.data.frame()
+  
+  # Calculate standard deviation by year
+  tabla_sd_anio <- tabla_var_anio %>%
+    mutate(sd = sqrt(!!sym(group_var))) %>%
+    select(year, sd)
+  
+  # Combine mean and standard deviation by year
+  tabla_media_sd_anio <- left_join(tabla_media_anio, tabla_sd_anio, by = "year")
+  
+  # Calculate pooled weighted mean and standard deviation
+  pooled_mean <- svymean(formula_var, design, na.rm = TRUE)
+  pooled_var <- svyvar(formula_var, design, na.rm = TRUE)
+  pooled_sd <- sqrt(as.numeric(pooled_var))
+  
+  # Create the pooled table
+  tabla_pooled <- data.frame(
+    mean_pooled = as.numeric(pooled_mean),
+    sd_pooled = pooled_sd
+  )
+  
+  # Format the mean and standard deviation table by year
+  tabla_media_sd_anio_formato <- tabla_media_sd_anio %>%
+    select(year, mean = !!sym(group_var), sd)
+  
+  # Pivot the table to have one row per variable
+  tabla_media_sd_anio_pivot <- tabla_media_sd_anio_formato %>%
+    pivot_longer(cols = c(mean, sd), names_to = "stat", values_to = "value") %>%
+    pivot_wider(names_from = c(stat, year), values_from = value)
+  
+  # Combine the yearly and pooled tables
+  tabla_completa <- bind_cols(tabla_media_sd_anio_pivot, tabla_pooled)
+  
+  # Add the variable name column at the beginning
+  tabla_completa <- tabla_completa %>%
+    mutate(variable = group_var) %>%
+    select(variable, everything())
+  
+  return(tabla_completa)
+}
+
+# List of variables for mean and standard deviation analysis
+variables_media_sd <- c("gasto_consulta", "gasto_medicina", "gasto_analisis", "gasto_rayosX",
+                        "gasto_dental", "gasto_oftalmo", "gasto_lentes", "gasto_anticonc", 
+                        "gasto_hospital", "gasto_cirugia", "porc_gasto", "affordability", "edad", "por_enf_cronica_hogar")
+
+# Create a list to store results for each variable
+resultados_media_sd_ponderada <- list()
+
+# Calculate weighted mean and standard deviation for each variable
+for (var in variables_media_sd) {
+  resultados_media_sd_ponderada[[var]] <- calcular_media_sd_ponderada(design, var)
+}
+
+
+# Crear un workbook para almacenar los resultados
+wb <- createWorkbook()
+addWorksheet(wb, "Resumen")
+
+# Iniciar en la primera fila
+start_row <- 1
+
+# Escribir resultados de medias y desviaciones estándar ponderadas en la hoja
+for (var in names(resultados_media_sd_ponderada)) {
+  # Nombre de la variable
+  writeData(wb, "Resumen", paste("Media y Desviación Estándar Ponderada -", var), startRow = start_row, startCol = 1)
+  
+  # Resultados de la variable
+  writeData(wb, "Resumen", resultados_media_sd_ponderada[[var]], startRow = start_row + 1, startCol = 1)
+  
+  # Actualizar la fila de inicio para la siguiente tabla, dejando un espacio de dos filas
+  start_row <- start_row + nrow(resultados_media_sd_ponderada[[var]]) + 4
+}
+
+# Guardar el archivo de Excel
+saveWorkbook(wb, "output/Tabla_Media_SD_Ponderada.xlsx", overwrite = TRUE)
+
+# Mensaje de éxito
+cat("Las tablas de medias y desviaciones estándar ponderadas han sido guardadas en 'Tabla_Media_SD_Ponderada.xlsx'.")
+
+
+```
+
+
+```{r Factores asociados a affordability, echo=FALSE, message=FALSE}
+
+# 8. Factores asociados a dias necesarios de trabaja pagar el gasto en salud
+
+#Revisar cada variable de forma individual - revisar la distribución de los datos - gráficos y luego pensar en el modelo ajustado
+
+# 1. Acceder a los datos subyacentes del diseño
+datos_modelo <- design$variables
+
+# 2. Verificar niveles de las variables categóricas y continuas
+categorical_vars_individual <- c("sexo", "nivel_educa_3cat", "seg_essalud", "seg_SIS", "est_civil")
+categorical_vars_household <- c("gasto_cata", "enf_cronica","hacinamiento")
+continuous_vars_individual <- c("edad")
+continuous_vars_household <- c("gasto_consulta", "gasto_medicina", "gasto_analisis", "gasto_rayosX",
+                               "gasto_dental", "gasto_oftalmo", "gasto_lentes", "gasto_anticonc", 
+                               "gasto_hospital", "gasto_cirugia", "porc_gasto", "por_enf_cronica_hogar",  "por_enf_cronica_hogar")
+
+# Función para verificar el tipo de variable
+check_variable_levels <- function(data, vars, desired_type) {
+  sapply(vars, function(var) {
+    actual_type <- ifelse(is.factor(data[[var]]), "categorical", "continuous")
+    list(variable = var, actual = actual_type, expected = desired_type, correct = (actual_type == desired_type))
+  }) %>% 
+    t() %>% 
+    as.data.frame() %>%
+    setNames(c("Variable", "Actual_Type", "Expected_Type", "Correct"))
+}
+
+# Revisar variables individuales
+check_individual_cat <- check_variable_levels(datos_modelo, categorical_vars_individual, "categorical")
+check_individual_cont <- check_variable_levels(datos_modelo, continuous_vars_individual, "continuous")
+
+# Revisar variables de hogar
+check_household_cat <- check_variable_levels(datos_modelo, categorical_vars_household, "categorical")
+check_household_cont <- check_variable_levels(datos_modelo, continuous_vars_household, "continuous")
+
+# Combinar resultados
+all_checks <- bind_rows(
+  mutate(as_tibble(check_individual_cat), Level = "Individual"),
+  mutate(as_tibble(check_individual_cont), Level = "Individual"),
+  mutate(as_tibble(check_household_cat), Level = "Household"),
+  mutate(as_tibble(check_household_cont), Level = "Household")
+)
+
+# Mostrar resultados en R
+print("Resultados de la validación de variables:")
+print(all_checks)
+
+# 3. Validar modelo multinivel
+modelo_multinivel <- lmer(
+  affordability ~ sexo + edad + est_civil + nivel_educa_3cat + seg_essalud + seg_SIS + por_enf_cronica_hogar + hacinamiento + est_social + #No considero que sea necesario agregar estas variables al modelo, al final son componentes del gasto. Voy a crear graficos para esto
+  (1 | hogar), # Efecto aleatorio para hogar
+  data = datos_modelo,
+  weights = ultimate_factor # Usar el factor de ponderación
+)
+
+# Resultados del modelo
+summary(modelo_multinivel)
+
+coef_table <- summary(modelo_multinivel)$coefficients
+conf_int <- confint(modelo_multinivel, method = "Wald")
+
+coef_df <- data.frame(
+  Term = rownames(coef_table),
+  Estimate = round(coef_table[, "Estimate"], 4),
+  StdError = round(coef_table[, "Std. Error"], 4),
+  CI_Lower = round(conf_int[rownames(coef_table), 1], 4),
+  CI_Upper = round(conf_int[rownames(coef_table), 2], 4)
+)
+
+```
+
+
+```{r Factores asociados a gastos catastróficos, echo=FALSE, message=FALSE}
+# 9. Factores asociados a gastos catastróficos en salud (Regresión logística multinivel)
+######################
+
+# 1. Acceder a los datos subyacentes del diseño
+datos_modelo <- design$variables
+
+# 2. Verificar niveles de las variables categóricas y continuas
+categorical_vars_individual <- c("sexo", "nivel_educa_3cat", "seg_essalud", "seg_SIS", "est_civil")
+categorical_vars_household <- c("enf_cronica_hogar", "hacinamiento", "est_social")
+continuous_vars_individual <- c("edad")
+continuous_vars_household <- c("gasto_consulta", "gasto_medicina", "gasto_analisis", "gasto_rayosX",
+                               "gasto_dental", "gasto_oftalmo", "gasto_lentes", "gasto_anticonc", 
+                               "gasto_hospital", "gasto_cirugia", "porc_gasto", "por_enf_cronica_hogar")
+
+# Convertir variables categóricas a factor (si no lo están)
+for (var in c(categorical_vars_individual, categorical_vars_household)) {
+  datos_modelo[[var]] <- as.factor(datos_modelo[[var]])
+}
+
+# 3. Validar modelo multinivel (regresión logística)
+
+modelo_multinivel_logit <- glmer(
+  gasto_cata ~ sexo + edad + est_civil + nivel_educa_3cat + seg_essalud + seg_SIS + 
+    por_enf_cronica_hogar + + hacinamiento + est_social +
+    (1 | hogar), # Efecto aleatorio para hogar
+  family = binomial(link = "logit"), # Modelo de regresión logística
+  data = datos_modelo,
+  weights = ultimate_factor # Usar el factor de ponderación
+)
+
+# 4. Mostrar resultados del modelo
+
+summary(modelo_multinivel_logit)
+```
+
+
+```{r Factores asociados a gasto por medicamentos, echo=FALSE, message=FALSE}
+
+# Crear modelo para medicamentos
+
+# Modelo: SES (individuo + hogar) - no gastos
+
+sexo + edad + est_civil + nivel_educa_3cat + seg_essalud + seg_SIS + 
+    por_enf_cronica_hogar + + hacinamiento + est_social
+
+# Por fa, agregar el codigo para exportar las tablas en excel (para los otros modelos tambien)
+
+```
+
+
+
+
